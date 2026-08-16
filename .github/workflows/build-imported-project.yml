@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 35
     env:
       # Public API address only. It contains no credential and is refreshed with the One App release.
-      ONE_APP_API_URL: https://3000-i4oiqd6t9mdx2qpgu4fa6-3b48ee0a.us3.manus.computer
+      ONE_APP_API_URL: https://kikonative-evby5xxj.manus.space
       WORK_ROOT: /tmp/one-app-build
     steps:
       - name: Claim one pending build securely
