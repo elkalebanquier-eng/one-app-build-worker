@@ -1,47 +1,52 @@
 name: Build One App imported project
-run-name: One App ${{ inputs.build_id }}
+run-name: One App build worker
 
 on:
+  schedule:
+    - cron: "*/5 * * * *"
   workflow_dispatch:
-    inputs:
-      build_id:
-        description: One App build identifier
-        required: true
-        type: string
-      project_type:
-        description: expo, android, or html
-        required: true
-        type: choice
-        options:
-          - expo
-          - android
-          - html
-      source_url:
-        description: Temporary One App ZIP download URL
-        required: true
-        type: string
-      output_url:
-        description: Temporary One App APK upload URL
-        required: true
-        type: string
 
-# User archives are untrusted. No repository token, secret, or write permission is provided to the job.
-permissions: {}
+# This public repository receives no One App secret. GitHub supplies only a short-lived
+# OIDC identity for each run; One App verifies the exact repository and workflow claims.
+permissions:
+  id-token: write
 
 jobs:
   build:
-    name: Compile ${{ inputs.project_type }} project
+    name: Check the One App build queue
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      BUILD_ID: ${{ inputs.build_id }}
-      PROJECT_TYPE: ${{ inputs.project_type }}
-      SOURCE_URL: ${{ inputs.source_url }}
-      OUTPUT_URL: ${{ inputs.output_url }}
+      ONE_APP_API_URL: ${{ vars.ONE_APP_API_URL }}
       WORK_ROOT: ${{ runner.temp }}/one-app-build
     steps:
-      - name: Download the submitted archive
+      - name: Claim one pending build securely
+        id: claim
         shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ONE_APP_API_URL"
+          OIDC_SEPARATOR="?"
+          [[ "$ACTIONS_ID_TOKEN_REQUEST_URL" == *"?"* ]] && OIDC_SEPARATOR="&"
+          OIDC_TOKEN="$(curl --fail --silent --show-error --header "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}${OIDC_SEPARATOR}audience=one-app-build-worker" | jq -r '.value')"
+          test -n "$OIDC_TOKEN" && test "$OIDC_TOKEN" != "null"
+          STATUS="$(curl --silent --show-error --output "$RUNNER_TEMP/one-app-job.json" --write-out '%{http_code}' --header "Authorization: Bearer $OIDC_TOKEN" "$ONE_APP_API_URL/api/builds/next")"
+          if [ "$STATUS" = "204" ]; then
+            echo "has_job=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          test "$STATUS" = "200"
+          echo "has_job=true" >> "$GITHUB_OUTPUT"
+          echo "build_id=$(jq -r '.id' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
+          echo "project_type=$(jq -r '.projectType' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
+          echo "source_url=$(jq -r '.sourceUrl' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
+          echo "output_url=$(jq -r '.outputUrl' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Download the submitted archive
+        if: ${{ steps.claim.outputs.has_job == 'true' }}
+        shell: bash
+        env:
+          SOURCE_URL: ${{ steps.claim.outputs.source_url }}
         run: |
           set -euo pipefail
           mkdir -p "$WORK_ROOT"
@@ -49,6 +54,7 @@ jobs:
           test -s "$WORK_ROOT/source.zip"
 
       - name: Validate and safely extract source archive
+        if: ${{ steps.claim.outputs.has_job == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -87,7 +93,10 @@ jobs:
           PY
 
       - name: Locate project root
+        if: ${{ steps.claim.outputs.has_job == 'true' }}
         shell: bash
+        env:
+          PROJECT_TYPE: ${{ steps.claim.outputs.project_type }}
         run: |
           set -euo pipefail
           case "$PROJECT_TYPE" in
@@ -101,19 +110,19 @@ jobs:
           echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
 
       - name: Set up Node.js for Expo builds
-        if: ${{ inputs.project_type == 'expo' }}
+        if: ${{ steps.claim.outputs.project_type == 'expo' }}
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
       - name: Set up pnpm for Expo builds
-        if: ${{ inputs.project_type == 'expo' }}
+        if: ${{ steps.claim.outputs.project_type == 'expo' }}
         uses: pnpm/action-setup@v4
         with:
           version: 9.12.0
 
       - name: Install Expo project dependencies
-        if: ${{ inputs.project_type == 'expo' }}
+        if: ${{ steps.claim.outputs.project_type == 'expo' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -127,17 +136,16 @@ jobs:
           fi
 
       - name: Generate Android project from Expo source
-        if: ${{ inputs.project_type == 'expo' }}
+        if: ${{ steps.claim.outputs.project_type == 'expo' }}
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_ROOT"
-          test -f package.json
           npx expo prebuild --platform android --non-interactive --clean
           echo "ANDROID_ROOT=$PROJECT_ROOT/android" >> "$GITHUB_ENV"
 
       - name: Select supplied Android project
-        if: ${{ inputs.project_type == 'android' }}
+        if: ${{ steps.claim.outputs.project_type == 'android' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -148,7 +156,7 @@ jobs:
           echo "ANDROID_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
 
       - name: Create an Android wrapper for static HTML
-        if: ${{ inputs.project_type == 'html' }}
+        if: ${{ steps.claim.outputs.project_type == 'html' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -162,40 +170,21 @@ jobs:
           include ':app'
           EOF
           cat > "$ANDROID_ROOT/build.gradle" <<'EOF'
-          plugins {
-              id 'com.android.application' version '8.7.3' apply false
-          }
+          plugins { id 'com.android.application' version '8.7.3' apply false }
           EOF
           cat > "$ANDROID_ROOT/app/build.gradle" <<'EOF'
           plugins { id 'com.android.application' }
           android {
               namespace 'space.oneapp.html'
               compileSdk 35
-              defaultConfig {
-                  applicationId 'space.oneapp.html'
-                  minSdk 24
-                  targetSdk 35
-                  versionCode 1
-                  versionName '1.0'
-              }
+              defaultConfig { applicationId 'space.oneapp.html'; minSdk 24; targetSdk 35; versionCode 1; versionName '1.0' }
           }
           EOF
           cat > "$ANDROID_ROOT/app/src/main/AndroidManifest.xml" <<'EOF'
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-            <application android:theme="@style/AppTheme" android:label="One App HTML">
-              <activity android:name=".MainActivity" android:exported="true">
-                <intent-filter>
-                  <action android:name="android.intent.action.MAIN" />
-                  <category android:name="android.intent.category.LAUNCHER" />
-                </intent-filter>
-              </activity>
-            </application>
-          </manifest>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"><application android:theme="@style/AppTheme" android:label="One App HTML"><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>
           EOF
           mkdir -p "$ANDROID_ROOT/app/src/main/res/values"
-          cat > "$ANDROID_ROOT/app/src/main/res/values/styles.xml" <<'EOF'
-          <resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar" /></resources>
-          EOF
+          echo '<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar" /></resources>' > "$ANDROID_ROOT/app/src/main/res/values/styles.xml"
           cat > "$ANDROID_ROOT/app/src/main/java/space/oneapp/html/MainActivity.java" <<'EOF'
           package space.oneapp.html;
           import android.app.Activity;
@@ -217,16 +206,18 @@ jobs:
           echo "ANDROID_ROOT=$ANDROID_ROOT" >> "$GITHUB_ENV"
 
       - name: Set up Java
+        if: ${{ steps.claim.outputs.has_job == 'true' }}
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Android SDK
+        if: ${{ steps.claim.outputs.has_job == 'true' }}
         uses: android-actions/setup-android@v3
 
       - name: Build debug APK from Expo or Android source
-        if: ${{ inputs.project_type == 'expo' || inputs.project_type == 'android' }}
+        if: ${{ steps.claim.outputs.project_type == 'expo' || steps.claim.outputs.project_type == 'android' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -234,7 +225,7 @@ jobs:
           ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
       - name: Build debug APK from HTML source
-        if: ${{ inputs.project_type == 'html' }}
+        if: ${{ steps.claim.outputs.project_type == 'html' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -244,16 +235,36 @@ jobs:
           ./gradle-8.10.2/bin/gradle :app:assembleDebug --no-daemon --stacktrace
 
       - name: Prepare APK artifact
+        if: ${{ steps.claim.outputs.has_job == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           APK_PATH="$(find "$ANDROID_ROOT/app/build/outputs/apk/debug" -maxdepth 1 -type f -name '*.apk' | head -n 1)"
           test -n "$APK_PATH"
           mkdir -p "$WORK_ROOT/output"
-          cp "$APK_PATH" "$WORK_ROOT/output/one-app-${BUILD_ID}.apk"
+          cp "$APK_PATH" "$WORK_ROOT/output/one-app-${{ steps.claim.outputs.build_id }}.apk"
 
       - name: Return temporary APK to One App
+        if: ${{ steps.claim.outputs.has_job == 'true' }}
         shell: bash
+        env:
+          OUTPUT_URL: ${{ steps.claim.outputs.output_url }}
+          BUILD_ID: ${{ steps.claim.outputs.build_id }}
         run: |
           set -euo pipefail
           curl --fail --show-error --request PUT --header "Content-Type: application/vnd.android.package-archive" --upload-file "$WORK_ROOT/output/one-app-${BUILD_ID}.apk" "$OUTPUT_URL"
+
+      - name: Report the result securely
+        if: ${{ always() && steps.claim.outputs.has_job == 'true' }}
+        shell: bash
+        env:
+          BUILD_ID: ${{ steps.claim.outputs.build_id }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          OIDC_SEPARATOR="?"
+          [[ "$ACTIONS_ID_TOKEN_REQUEST_URL" == *"?"* ]] && OIDC_SEPARATOR="&"
+          OIDC_TOKEN="$(curl --fail --silent --show-error --header "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}${OIDC_SEPARATOR}audience=one-app-build-worker" | jq -r '.value')"
+          OUTCOME="failed"
+          [ "$JOB_STATUS" = "success" ] && OUTCOME="complete"
+          curl --fail --show-error --request POST --header "Authorization: Bearer $OIDC_TOKEN" --header "Content-Type: application/json" --data "{\"outcome\":\"$OUTCOME\"}" "$ONE_APP_API_URL/api/builds/$BUILD_ID/complete"
