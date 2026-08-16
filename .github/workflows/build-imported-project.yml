@@ -106,7 +106,11 @@ jobs:
             html) marker="index.html" ;;
             *) echo "Unsupported project type." >&2; exit 1 ;;
           esac
-          PROJECT_ROOT="$(find "$WORK_ROOT/project" -maxdepth 3 -type f -name "$marker" -printf '%h\n' | head -n 1)"
+          if [ "$PROJECT_TYPE" = "android" ]; then
+            PROJECT_ROOT="$(find "$WORK_ROOT/project" -maxdepth 3 -type f \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -printf '%h\n' | head -n 1)"
+          else
+            PROJECT_ROOT="$(find "$WORK_ROOT/project" -maxdepth 3 -type f -name "$marker" -printf '%h\n' | head -n 1)"
+          fi
           test -n "$PROJECT_ROOT"
           echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
 
@@ -162,7 +166,10 @@ jobs:
         run: |
           set -euo pipefail
           ANDROID_ROOT="$WORK_ROOT/html-android"
-          mkdir -p "$ANDROID_ROOT/app/src/main/java/space/oneapp/html" "$ANDROID_ROOT/app/src/main/assets"
+          APP_SUFFIX="$(echo '${{ steps.claim.outputs.build_id }}' | tr -cd 'a-zA-Z0-9' | tr '[:upper:]' '[:lower:]')"
+          APP_PACKAGE="space.oneapp.html.${APP_SUFFIX}"
+          APP_PACKAGE_PATH="${APP_PACKAGE//./\/}"
+          mkdir -p "$ANDROID_ROOT/app/src/main/java/$APP_PACKAGE_PATH" "$ANDROID_ROOT/app/src/main/assets"
           cp -R "$PROJECT_ROOT"/. "$ANDROID_ROOT/app/src/main/assets/"
           cat > "$ANDROID_ROOT/settings.gradle" <<'EOF'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
@@ -173,12 +180,12 @@ jobs:
           cat > "$ANDROID_ROOT/build.gradle" <<'EOF'
           plugins { id 'com.android.application' version '8.7.3' apply false }
           EOF
-          cat > "$ANDROID_ROOT/app/build.gradle" <<'EOF'
+          cat > "$ANDROID_ROOT/app/build.gradle" <<EOF
           plugins { id 'com.android.application' }
           android {
-              namespace 'space.oneapp.html'
+              namespace '$APP_PACKAGE'
               compileSdk 35
-              defaultConfig { applicationId 'space.oneapp.html'; minSdk 24; targetSdk 35; versionCode 1; versionName '1.0' }
+              defaultConfig { applicationId '$APP_PACKAGE'; minSdk 24; targetSdk 35; versionCode 1; versionName '1.0' }
           }
           EOF
           cat > "$ANDROID_ROOT/app/src/main/AndroidManifest.xml" <<'EOF'
@@ -186,8 +193,8 @@ jobs:
           EOF
           mkdir -p "$ANDROID_ROOT/app/src/main/res/values"
           echo '<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar" /></resources>' > "$ANDROID_ROOT/app/src/main/res/values/styles.xml"
-          cat > "$ANDROID_ROOT/app/src/main/java/space/oneapp/html/MainActivity.java" <<'EOF'
-          package space.oneapp.html;
+          cat > "$ANDROID_ROOT/app/src/main/java/$APP_PACKAGE_PATH/MainActivity.java" <<EOF
+          package $APP_PACKAGE;
           import android.app.Activity;
           import android.os.Bundle;
           import android.webkit.WebSettings;
