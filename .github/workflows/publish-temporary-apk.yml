@@ -1,0 +1,103 @@
+name: Publish temporary One App APK
+run-name: Publish temporary One App APK
+
+on:
+  workflow_run:
+    workflows: ["Build One App imported project"]
+    types: [completed]
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+# This workflow runs from the trusted default branch and never executes source
+# code imported by a One App user. It is the sole workflow with repository write
+# access, narrowly limited to the temporary release lifecycle.
+permissions:
+  actions: read
+  contents: write
+  id-token: write
+
+env:
+  ONE_APP_API_URL: https://3000-i4oiqd6t9mdx2qpgu4fa6-3b48ee0a.us3.manus.computer
+
+jobs:
+  publish:
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Find the temporary APK artifact
+        id: artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          ARTIFACT_NAME="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[] | select(.expired == false and (.name | startswith("one-app-build-"))) | .name' | head -n 1)"
+          if [ -z "$ARTIFACT_NAME" ]; then
+            echo "has_apk=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BUILD_ID="${ARTIFACT_NAME#one-app-}"
+          case "$BUILD_ID" in build-????????????*) ;; *) echo "Invalid build identifier" >&2; exit 1 ;; esac
+          echo "has_apk=true" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          echo "build_id=$BUILD_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Download the APK artifact
+        if: ${{ steps.artifact.outputs.has_apk == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          ARTIFACT_NAME: ${{ steps.artifact.outputs.artifact_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/one-app-apk"
+          gh run download "$RUN_ID" --name "$ARTIFACT_NAME" --dir "$RUNNER_TEMP/one-app-apk"
+          test -f "$RUNNER_TEMP/one-app-apk/one-app-${{ steps.artifact.outputs.build_id }}.apk"
+
+      - name: Publish a public APK release for 48 hours
+        if: ${{ steps.artifact.outputs.has_apk == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_ID: ${{ steps.artifact.outputs.build_id }}
+        run: |
+          set -euo pipefail
+          TAG="one-app-build-$BUILD_ID"
+          APK="$RUNNER_TEMP/one-app-apk/one-app-$BUILD_ID.apk"
+          gh release create "$TAG" "$APK#one-app-$BUILD_ID.apk" --repo "$GITHUB_REPOSITORY" --title "APK One App temporaire" --notes "APK créée par One App. Suppression automatique après 48 heures." --prerelease --target "$GITHUB_SHA"
+
+      - name: Confirm secure completion to One App
+        if: ${{ steps.artifact.outputs.has_apk == 'true' }}
+        shell: bash
+        env:
+          BUILD_ID: ${{ steps.artifact.outputs.build_id }}
+        run: |
+          set -euo pipefail
+          OIDC_SEPARATOR="?"
+          [[ "$ACTIONS_ID_TOKEN_REQUEST_URL" == *"?"* ]] && OIDC_SEPARATOR="&"
+          OIDC_TOKEN="$(curl --fail --silent --show-error --header "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}${OIDC_SEPARATOR}audience=one-app-build-worker" | jq -r '.value')"
+          curl --fail --show-error --request POST --header "Authorization: Bearer $OIDC_TOKEN" --header "Content-Type: application/json" --data '{"outcome":"complete"}' "$ONE_APP_API_URL/api/builds/$BUILD_ID/complete"
+
+  cleanup:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Delete One App APK releases older than 48 hours
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          CUTOFF="$(date --utc --date='48 hours ago' +%s)"
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt --jq '.[] | select(.tagName | startswith("one-app-build-")) | [.tagName, .createdAt] | @tsv' | while IFS=$'\t' read -r TAG CREATED_AT; do
+            [ -z "$TAG" ] && continue
+            CREATED_SECONDS="$(date --utc --date="$CREATED_AT" +%s)"
+            if [ "$CREATED_SECONDS" -le "$CUTOFF" ]; then
+              gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+            fi
+          done

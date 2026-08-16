@@ -252,15 +252,17 @@ jobs:
           mkdir -p "$WORK_ROOT/output"
           cp "$APK_PATH" "$WORK_ROOT/output/one-app-${{ steps.claim.outputs.build_id }}.apk"
 
-      - name: Return temporary APK to One App
+      # The imported project may run installation or build scripts. It therefore
+      # never receives contents:write. The APK is passed as a short-lived
+      # Actions artifact to a separate, trusted publisher workflow.
+      - name: Keep APK briefly for the trusted publisher
         if: ${{ steps.claim.outputs.has_job == 'true' }}
-        shell: bash
-        env:
-          OUTPUT_URL: ${{ steps.claim.outputs.output_url }}
-          BUILD_ID: ${{ steps.claim.outputs.build_id }}
-        run: |
-          set -euo pipefail
-          curl --fail --show-error --request PUT --header "Content-Type: application/vnd.android.package-archive" --upload-file "$WORK_ROOT/output/one-app-${BUILD_ID}.apk" "$OUTPUT_URL"
+        uses: actions/upload-artifact@v4
+        with:
+          name: one-app-${{ steps.claim.outputs.build_id }}
+          path: ${{ env.WORK_ROOT }}/output/one-app-${{ steps.claim.outputs.build_id }}.apk
+          if-no-files-found: error
+          retention-days: 2
 
       - name: Report the result securely
         if: ${{ always() && steps.claim.outputs.has_job == 'true' }}
@@ -273,6 +275,9 @@ jobs:
           OIDC_SEPARATOR="?"
           [[ "$ACTIONS_ID_TOKEN_REQUEST_URL" == *"?"* ]] && OIDC_SEPARATOR="&"
           OIDC_TOKEN="$(curl --fail --silent --show-error --header "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}${OIDC_SEPARATOR}audience=one-app-build-worker" | jq -r '.value')"
-          OUTCOME="failed"
-          [ "$JOB_STATUS" = "success" ] && OUTCOME="complete"
-          curl --fail --show-error --request POST --header "Authorization: Bearer $OIDC_TOKEN" --header "Content-Type: application/json" --data "{\"outcome\":\"$OUTCOME\"}" "$ONE_APP_API_URL/api/builds/$BUILD_ID/complete"
+          # A successful build is reported by the isolated publisher only after
+          # GitHub has accepted the APK release. This worker reports failures.
+          if [ "$JOB_STATUS" = "success" ]; then
+            exit 0
+          fi
+          curl --fail --show-error --request POST --header "Authorization: Bearer $OIDC_TOKEN" --header "Content-Type: application/json" --data '{"outcome":"failed"}' "$ONE_APP_API_URL/api/builds/$BUILD_ID/complete"
