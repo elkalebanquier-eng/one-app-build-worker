@@ -17,7 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      ONE_APP_API_URL: ${{ vars.ONE_APP_API_URL }}
+      # Public API address only. It contains no credential and is refreshed with the One App release.
+      ONE_APP_API_URL: https://3000-i4oiqd6t9mdx2qpgu4fa6-3b48ee0a.us3.manus.computer
       WORK_ROOT: ${{ runner.temp }}/one-app-build
     steps:
       - name: Claim one pending build securely
