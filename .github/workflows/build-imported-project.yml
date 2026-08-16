@@ -1,0 +1,259 @@
+name: Build One App imported project
+run-name: One App ${{ inputs.build_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: One App build identifier
+        required: true
+        type: string
+      project_type:
+        description: expo, android, or html
+        required: true
+        type: choice
+        options:
+          - expo
+          - android
+          - html
+      source_url:
+        description: Temporary One App ZIP download URL
+        required: true
+        type: string
+      output_url:
+        description: Temporary One App APK upload URL
+        required: true
+        type: string
+
+# User archives are untrusted. No repository token, secret, or write permission is provided to the job.
+permissions: {}
+
+jobs:
+  build:
+    name: Compile ${{ inputs.project_type }} project
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      BUILD_ID: ${{ inputs.build_id }}
+      PROJECT_TYPE: ${{ inputs.project_type }}
+      SOURCE_URL: ${{ inputs.source_url }}
+      OUTPUT_URL: ${{ inputs.output_url }}
+      WORK_ROOT: ${{ runner.temp }}/one-app-build
+    steps:
+      - name: Download the submitted archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORK_ROOT"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 2 --output "$WORK_ROOT/source.zip" "$SOURCE_URL"
+          test -s "$WORK_ROOT/source.zip"
+
+      - name: Validate and safely extract source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORK_ROOT/project"
+          python3 - "$WORK_ROOT/source.zip" "$WORK_ROOT/project" <<'PY'
+          import os
+          import stat
+          import sys
+          import zipfile
+
+          archive_path, destination = sys.argv[1:]
+          blocked_parts = {"node_modules", ".git", "build", "dist", ".gradle", ".idea"}
+          max_files = 10_000
+          max_uncompressed_bytes = 250 * 1024 * 1024
+
+          with zipfile.ZipFile(archive_path) as archive:
+              entries = archive.infolist()
+              if not entries or len(entries) > max_files:
+                  raise SystemExit("The archive is empty or contains too many files.")
+              total = sum(entry.file_size for entry in entries)
+              if total > max_uncompressed_bytes:
+                  raise SystemExit("The archive expands beyond the 250 MB safety limit.")
+              for entry in entries:
+                  normalized = entry.filename.replace("\\", "/")
+                  parts = [part for part in normalized.split("/") if part not in ("", ".")]
+                  if normalized.startswith("/") or ".." in parts or any(part in blocked_parts for part in parts):
+                      raise SystemExit(f"Unsafe or unsupported archive entry: {entry.filename}")
+                  mode = entry.external_attr >> 16
+                  if stat.S_IFMT(mode) == stat.S_IFLNK:
+                      raise SystemExit(f"Symbolic links are not allowed: {entry.filename}")
+              for entry in entries:
+                  target = os.path.realpath(os.path.join(destination, entry.filename))
+                  if not target.startswith(os.path.realpath(destination) + os.sep):
+                      raise SystemExit("Archive path escapes its destination.")
+                  archive.extract(entry, destination)
+          PY
+
+      - name: Locate project root
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$PROJECT_TYPE" in
+            expo) marker="package.json" ;;
+            android) marker="settings.gradle" ;;
+            html) marker="index.html" ;;
+            *) echo "Unsupported project type." >&2; exit 1 ;;
+          esac
+          PROJECT_ROOT="$(find "$WORK_ROOT/project" -maxdepth 3 -type f -name "$marker" -printf '%h\n' | head -n 1)"
+          test -n "$PROJECT_ROOT"
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+
+      - name: Set up Node.js for Expo builds
+        if: ${{ inputs.project_type == 'expo' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up pnpm for Expo builds
+        if: ${{ inputs.project_type == 'expo' }}
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+
+      - name: Install Expo project dependencies
+        if: ${{ inputs.project_type == 'expo' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+          if [ -f pnpm-lock.yaml ]; then
+            pnpm install --frozen-lockfile
+          elif [ -f package-lock.json ]; then
+            npm ci
+          else
+            pnpm install --no-frozen-lockfile
+          fi
+
+      - name: Generate Android project from Expo source
+        if: ${{ inputs.project_type == 'expo' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+          test -f package.json
+          npx expo prebuild --platform android --non-interactive --clean
+          echo "ANDROID_ROOT=$PROJECT_ROOT/android" >> "$GITHUB_ENV"
+
+      - name: Select supplied Android project
+        if: ${{ inputs.project_type == 'android' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$PROJECT_ROOT/settings.gradle" || test -f "$PROJECT_ROOT/settings.gradle.kts"
+          test -d "$PROJECT_ROOT/app"
+          test -f "$PROJECT_ROOT/gradlew"
+          chmod +x "$PROJECT_ROOT/gradlew"
+          echo "ANDROID_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+
+      - name: Create an Android wrapper for static HTML
+        if: ${{ inputs.project_type == 'html' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ANDROID_ROOT="$WORK_ROOT/html-android"
+          mkdir -p "$ANDROID_ROOT/app/src/main/java/space/oneapp/html" "$ANDROID_ROOT/app/src/main/assets"
+          cp -R "$PROJECT_ROOT"/. "$ANDROID_ROOT/app/src/main/assets/"
+          cat > "$ANDROID_ROOT/settings.gradle" <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+          rootProject.name = "OneAppHtml"
+          include ':app'
+          EOF
+          cat > "$ANDROID_ROOT/build.gradle" <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+          cat > "$ANDROID_ROOT/app/build.gradle" <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'space.oneapp.html'
+              compileSdk 35
+              defaultConfig {
+                  applicationId 'space.oneapp.html'
+                  minSdk 24
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0'
+              }
+          }
+          EOF
+          cat > "$ANDROID_ROOT/app/src/main/AndroidManifest.xml" <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <application android:theme="@style/AppTheme" android:label="One App HTML">
+              <activity android:name=".MainActivity" android:exported="true">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN" />
+                  <category android:name="android.intent.category.LAUNCHER" />
+                </intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          EOF
+          mkdir -p "$ANDROID_ROOT/app/src/main/res/values"
+          cat > "$ANDROID_ROOT/app/src/main/res/values/styles.xml" <<'EOF'
+          <resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar" /></resources>
+          EOF
+          cat > "$ANDROID_ROOT/app/src/main/java/space/oneapp/html/MainActivity.java" <<'EOF'
+          package space.oneapp.html;
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          public class MainActivity extends Activity {
+            @Override public void onCreate(Bundle state) {
+              super.onCreate(state);
+              WebView view = new WebView(this);
+              WebSettings settings = view.getSettings();
+              settings.setJavaScriptEnabled(true);
+              settings.setDomStorageEnabled(true);
+              view.loadUrl("file:///android_asset/index.html");
+              setContentView(view);
+            }
+          }
+          EOF
+          echo "ANDROID_ROOT=$ANDROID_ROOT" >> "$GITHUB_ENV"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build debug APK from Expo or Android source
+        if: ${{ inputs.project_type == 'expo' || inputs.project_type == 'android' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$ANDROID_ROOT"
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Build debug APK from HTML source
+        if: ${{ inputs.project_type == 'html' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$ANDROID_ROOT"
+          curl --fail --location --proto '=https' --tlsv1.2 --output gradle.zip https://services.gradle.org/distributions/gradle-8.10.2-bin.zip
+          unzip -q gradle.zip
+          ./gradle-8.10.2/bin/gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Prepare APK artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_PATH="$(find "$ANDROID_ROOT/app/build/outputs/apk/debug" -maxdepth 1 -type f -name '*.apk' | head -n 1)"
+          test -n "$APK_PATH"
+          mkdir -p "$WORK_ROOT/output"
+          cp "$APK_PATH" "$WORK_ROOT/output/one-app-${BUILD_ID}.apk"
+
+      - name: Return temporary APK to One App
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --show-error --request PUT --header "Content-Type: application/vnd.android.package-archive" --upload-file "$WORK_ROOT/output/one-app-${BUILD_ID}.apk" "$OUTPUT_URL"
