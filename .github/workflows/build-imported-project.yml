@@ -42,6 +42,9 @@ jobs:
           echo "project_type=$(jq -r '.projectType' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
           echo "source_url=$(jq -r '.sourceUrl' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
           echo "icon_url=$(jq -r '.iconUrl // empty' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
+          echo "package_name=$(jq -r '.packageName' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
+          echo "app_version=$(jq -r '.appVersion' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
+          echo "version_code=$(jq -r '.versionCode' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
           echo "output_url=$(jq -r '.outputUrl' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
 
       - name: Download the submitted archive
@@ -182,11 +185,16 @@ jobs:
       - name: Create an Android wrapper for static HTML
         if: ${{ steps.claim.outputs.project_type == 'html' }}
         shell: bash
+        env:
+          APP_PACKAGE: ${{ steps.claim.outputs.package_name }}
+          APP_VERSION: ${{ steps.claim.outputs.app_version }}
+          APP_VERSION_CODE: ${{ steps.claim.outputs.version_code }}
         run: |
           set -euo pipefail
           ANDROID_ROOT="$WORK_ROOT/html-android"
-          APP_SUFFIX="$(echo '${{ steps.claim.outputs.build_id }}' | tr -cd 'a-zA-Z0-9' | tr '[:upper:]' '[:lower:]')"
-          APP_PACKAGE="space.oneapp.html.${APP_SUFFIX}"
+          test -n "$APP_PACKAGE"
+          test -n "$APP_VERSION"
+          test -n "$APP_VERSION_CODE"
           APP_PACKAGE_PATH="${APP_PACKAGE//./\/}"
           mkdir -p "$ANDROID_ROOT/app/src/main/java/$APP_PACKAGE_PATH" "$ANDROID_ROOT/app/src/main/assets"
           cp -R "$PROJECT_ROOT"/. "$ANDROID_ROOT/app/src/main/assets/"
@@ -204,7 +212,7 @@ jobs:
           android {
               namespace '$APP_PACKAGE'
               compileSdk 35
-              defaultConfig { applicationId '$APP_PACKAGE'; minSdk 24; targetSdk 35; versionCode 1; versionName '1.0' }
+              defaultConfig { applicationId '$APP_PACKAGE'; minSdk 24; targetSdk 35; versionCode $APP_VERSION_CODE; versionName '$APP_VERSION' }
           }
           EOF
           cat > "$ANDROID_ROOT/app/src/main/AndroidManifest.xml" <<'EOF'
@@ -231,6 +239,61 @@ jobs:
           }
           EOF
           echo "ANDROID_ROOT=$ANDROID_ROOT" >> "$GITHUB_ENV"
+
+      - name: Apply requested package and version to Expo or Android source
+        if: ${{ steps.claim.outputs.project_type == 'expo' || steps.claim.outputs.project_type == 'android' }}
+        shell: bash
+        env:
+          APP_PACKAGE: ${{ steps.claim.outputs.package_name }}
+          APP_VERSION: ${{ steps.claim.outputs.app_version }}
+          APP_VERSION_CODE: ${{ steps.claim.outputs.version_code }}
+        run: |
+          set -euo pipefail
+          test -n "$APP_PACKAGE"
+          test -n "$APP_VERSION"
+          test -n "$APP_VERSION_CODE"
+          python3 - "$ANDROID_ROOT" "$APP_PACKAGE" "$APP_VERSION" "$APP_VERSION_CODE" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          android_root, package_name, app_version, version_code = sys.argv[1:]
+          app_dir = pathlib.Path(android_root) / "app"
+          gradle = next((path for path in (app_dir / "build.gradle", app_dir / "build.gradle.kts") if path.exists()), None)
+          if gradle is None:
+              raise SystemExit("Android app build file is missing.")
+
+          content = gradle.read_text(encoding="utf-8")
+          old_namespace = None
+          namespace_match = re.search(r'(?m)^(\s*namespace\s*(?:=\s*)?["\'])([^"\']+)(["\'])', content)
+          if namespace_match:
+              old_namespace = namespace_match.group(2)
+              content = content[:namespace_match.start(2)] + package_name + content[namespace_match.end(2):]
+
+          def replace_string(source, field, value):
+              pattern = rf'(?m)^(\s*{field}\s*(?:=\s*)?["\'])([^"\']+)(["\'])'
+              if not re.search(pattern, source):
+                  raise SystemExit(f"Android field {field} is missing.")
+              return re.sub(pattern, lambda match: match.group(1) + value + match.group(3), source, count=1)
+
+          def replace_number(source, field, value):
+              pattern = rf'(?m)^(\s*{field}\s*(?:=\s*)?)(\d+)'
+              if not re.search(pattern, source):
+                  raise SystemExit(f"Android field {field} is missing.")
+              return re.sub(pattern, lambda match: match.group(1) + value, source, count=1)
+
+          content = replace_string(content, "applicationId", package_name)
+          content = replace_string(content, "versionName", app_version)
+          content = replace_number(content, "versionCode", version_code)
+          gradle.write_text(content, encoding="utf-8")
+
+          if old_namespace and old_namespace != package_name:
+              for source in app_dir.joinpath("src", "main").rglob("*"):
+                  if source.suffix not in {".kt", ".java"}:
+                      continue
+                  source_content = source.read_text(encoding="utf-8")
+                  source.write_text(source_content.replace(f"package {old_namespace}", f"package {package_name}"), encoding="utf-8")
+          PY
 
       - name: Apply the selected application icon
         if: ${{ steps.claim.outputs.has_job == 'true' && steps.claim.outputs.icon_url != '' }}
