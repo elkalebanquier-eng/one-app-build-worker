@@ -45,7 +45,8 @@ jobs:
           echo "package_name=$(jq -r '.packageName' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
           echo "app_version=$(jq -r '.appVersion' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
           echo "version_code=$(jq -r '.versionCode' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
-          echo "output_url=$(jq -r '.outputUrl' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
+          echo "worker_completion_url=$(jq -r '.workerCompletionUrl' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
+          echo "publisher_completion_url=$(jq -r '.publisherCompletionUrl' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
 
       - name: Download the submitted archive
         if: ${{ steps.claim.outputs.has_job == 'true' }}
@@ -354,12 +355,16 @@ jobs:
       - name: Prepare APK artifact
         if: ${{ steps.claim.outputs.has_job == 'true' }}
         shell: bash
+        env:
+          PUBLISHER_COMPLETION_URL: ${{ steps.claim.outputs.publisher_completion_url }}
         run: |
           set -euo pipefail
+          test -n "$PUBLISHER_COMPLETION_URL"
           APK_PATH="$(find "$ANDROID_ROOT/app/build/outputs/apk/debug" -maxdepth 1 -type f -name '*.apk' | head -n 1)"
           test -n "$APK_PATH"
           mkdir -p "$WORK_ROOT/output"
           cp "$APK_PATH" "$WORK_ROOT/output/one-app-${{ steps.claim.outputs.build_id }}.apk"
+          jq -n --arg completionUrl "$PUBLISHER_COMPLETION_URL" '{completionUrl: $completionUrl}' > "$WORK_ROOT/output/one-app-${{ steps.claim.outputs.build_id }}.json"
 
       # The imported project may run installation or build scripts. It therefore
       # never receives contents:write. The APK is passed as a short-lived
@@ -379,14 +384,12 @@ jobs:
         env:
           BUILD_ID: ${{ steps.claim.outputs.build_id }}
           JOB_STATUS: ${{ job.status }}
+          WORKER_COMPLETION_URL: ${{ steps.claim.outputs.worker_completion_url }}
         run: |
           set -euo pipefail
-          OIDC_SEPARATOR="?"
-          [[ "$ACTIONS_ID_TOKEN_REQUEST_URL" == *"?"* ]] && OIDC_SEPARATOR="&"
-          OIDC_TOKEN="$(curl --fail --silent --show-error --header "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}${OIDC_SEPARATOR}audience=one-app-build-worker" | jq -r '.value')"
           # A successful build is reported by the isolated publisher only after
           # GitHub has accepted the APK release. This worker reports failures.
           if [ "$JOB_STATUS" = "success" ]; then
             exit 0
           fi
-          curl --fail --show-error --request POST --header "Authorization: Bearer $OIDC_TOKEN" --header "Content-Type: application/json" --data '{"outcome":"failed"}' "$ONE_APP_API_URL/api/builds/$BUILD_ID/complete"
+          curl --fail --show-error --request POST --header "Content-Type: application/json" --data '{"outcome":"failed"}' "$WORKER_COMPLETION_URL"
