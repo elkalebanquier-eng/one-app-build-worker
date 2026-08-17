@@ -41,6 +41,7 @@ jobs:
           echo "build_id=$(jq -r '.id' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
           echo "project_type=$(jq -r '.projectType' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
           echo "source_url=$(jq -r '.sourceUrl' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
+          echo "icon_url=$(jq -r '.iconUrl // empty' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
           echo "output_url=$(jq -r '.outputUrl' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
 
       - name: Download the submitted archive
@@ -57,6 +58,20 @@ jobs:
           test -n "$OIDC_TOKEN" && test "$OIDC_TOKEN" != "null"
           curl --fail --location --proto '=https' --tlsv1.2 --retry 2 --header "Authorization: Bearer $OIDC_TOKEN" --output "$WORK_ROOT/source.zip" "$SOURCE_URL"
           test -s "$WORK_ROOT/source.zip"
+
+      - name: Download the selected application icon
+        if: ${{ steps.claim.outputs.has_job == 'true' && steps.claim.outputs.icon_url != '' }}
+        shell: bash
+        env:
+          ICON_URL: ${{ steps.claim.outputs.icon_url }}
+        run: |
+          set -euo pipefail
+          OIDC_SEPARATOR="?"
+          [[ "$ACTIONS_ID_TOKEN_REQUEST_URL" == *"?"* ]] && OIDC_SEPARATOR="&"
+          OIDC_TOKEN="$(curl --fail --silent --show-error --header "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}${OIDC_SEPARATOR}audience=one-app-build-worker" | jq -r '.value')"
+          test -n "$OIDC_TOKEN" && test "$OIDC_TOKEN" != "null"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 2 --header "Authorization: Bearer $OIDC_TOKEN" --output "$WORK_ROOT/custom-icon.png" "$ICON_URL"
+          test -s "$WORK_ROOT/custom-icon.png"
 
       - name: Validate and safely extract source archive
         if: ${{ steps.claim.outputs.has_job == 'true' }}
@@ -216,6 +231,33 @@ jobs:
           }
           EOF
           echo "ANDROID_ROOT=$ANDROID_ROOT" >> "$GITHUB_ENV"
+
+      - name: Apply the selected application icon
+        if: ${{ steps.claim.outputs.has_job == 'true' && steps.claim.outputs.icon_url != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$WORK_ROOT/custom-icon.png"
+          MANIFEST="$ANDROID_ROOT/app/src/main/AndroidManifest.xml"
+          test -f "$MANIFEST"
+          mkdir -p "$ANDROID_ROOT/app/src/main/res/drawable-nodpi"
+          cp "$WORK_ROOT/custom-icon.png" "$ANDROID_ROOT/app/src/main/res/drawable-nodpi/one_app_custom_icon.png"
+          python3 - "$MANIFEST" <<'PY'
+          import re
+          import sys
+
+          manifest = sys.argv[1]
+          content = open(manifest, encoding="utf-8").read()
+          match = re.search(r"<application\b[^>]*>", content)
+          if not match:
+              raise SystemExit("Android application tag is missing.")
+          tag = match.group(0)
+          if "android:icon=" in tag:
+              replacement = re.sub(r'android:icon="[^"]*"', 'android:icon="@drawable/one_app_custom_icon"', tag, count=1)
+          else:
+              replacement = tag[:-1] + ' android:icon="@drawable/one_app_custom_icon">'
+          open(manifest, "w", encoding="utf-8").write(content[:match.start()] + replacement + content[match.end():])
+          PY
 
       - name: Set up Java
         if: ${{ steps.claim.outputs.has_job == 'true' }}
