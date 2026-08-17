@@ -374,7 +374,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: one-app-${{ steps.claim.outputs.build_id }}
-          path: ${{ env.WORK_ROOT }}/output/one-app-${{ steps.claim.outputs.build_id }}.apk
+          # The publisher needs both the binary and the single-use completion URL.
+          # Keeping them in one short-lived artifact preserves the trusted split:
+          # imported code still cannot publish a GitHub release itself.
+          path: |
+            ${{ env.WORK_ROOT }}/output/one-app-${{ steps.claim.outputs.build_id }}.apk
+            ${{ env.WORK_ROOT }}/output/one-app-${{ steps.claim.outputs.build_id }}.json
           if-no-files-found: error
           retention-days: 2
 
