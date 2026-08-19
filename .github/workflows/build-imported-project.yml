@@ -40,6 +40,7 @@ jobs:
           echo "has_job=true" >> "$GITHUB_OUTPUT"
           echo "build_id=$(jq -r '.id' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
           echo "project_type=$(jq -r '.projectType' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
+          echo "build_mode=$(jq -r '.buildMode // "debug"' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
           echo "source_url=$(jq -r '.sourceUrl' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
           echo "icon_url=$(jq -r '.iconUrl // empty' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
           echo "package_name=$(jq -r '.packageName' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
@@ -334,37 +335,48 @@ jobs:
         if: ${{ steps.claim.outputs.has_job == 'true' }}
         uses: android-actions/setup-android@v3
 
-      - name: Build debug APK from Expo or Android source
+      - name: Build APK from Expo or Android source
         if: ${{ steps.claim.outputs.project_type == 'expo' || steps.claim.outputs.project_type == 'android' }}
         shell: bash
+        env:
+          BUILD_MODE: ${{ steps.claim.outputs.build_mode }}
         run: |
           set -euo pipefail
           cd "$ANDROID_ROOT"
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+          TASK="assembleDebug"
+          [ "$BUILD_MODE" = "signed" ] && TASK="assembleRelease"
+          ./gradlew ":app:$TASK" --no-daemon --stacktrace
 
-      - name: Build debug APK from HTML source
+      - name: Build APK from HTML source
         if: ${{ steps.claim.outputs.project_type == 'html' }}
         shell: bash
+        env:
+          BUILD_MODE: ${{ steps.claim.outputs.build_mode }}
         run: |
           set -euo pipefail
           cd "$ANDROID_ROOT"
           curl --fail --location --proto '=https' --tlsv1.2 --output gradle.zip https://services.gradle.org/distributions/gradle-8.10.2-bin.zip
           unzip -q gradle.zip
-          ./gradle-8.10.2/bin/gradle :app:assembleDebug --no-daemon --stacktrace
+          TASK="assembleDebug"
+          [ "$BUILD_MODE" = "signed" ] && TASK="assembleRelease"
+          ./gradle-8.10.2/bin/gradle ":app:$TASK" --no-daemon --stacktrace
 
       - name: Prepare APK artifact
         if: ${{ steps.claim.outputs.has_job == 'true' }}
         shell: bash
         env:
           PUBLISHER_COMPLETION_URL: ${{ steps.claim.outputs.publisher_completion_url }}
+          BUILD_MODE: ${{ steps.claim.outputs.build_mode }}
         run: |
           set -euo pipefail
           test -n "$PUBLISHER_COMPLETION_URL"
-          APK_PATH="$(find "$ANDROID_ROOT/app/build/outputs/apk/debug" -maxdepth 1 -type f -name '*.apk' | head -n 1)"
+          APK_VARIANT="debug"
+          [ "$BUILD_MODE" = "signed" ] && APK_VARIANT="release"
+          APK_PATH="$(find "$ANDROID_ROOT/app/build/outputs/apk/$APK_VARIANT" -maxdepth 1 -type f -name '*.apk' | head -n 1)"
           test -n "$APK_PATH"
           mkdir -p "$WORK_ROOT/output"
           cp "$APK_PATH" "$WORK_ROOT/output/one-app-${{ steps.claim.outputs.build_id }}.apk"
-          jq -n --arg completionUrl "$PUBLISHER_COMPLETION_URL" '{completionUrl: $completionUrl}' > "$WORK_ROOT/output/one-app-${{ steps.claim.outputs.build_id }}.json"
+          jq -n --arg completionUrl "$PUBLISHER_COMPLETION_URL" --arg buildMode "$BUILD_MODE" '{completionUrl: $completionUrl, buildMode: $buildMode}' > "$WORK_ROOT/output/one-app-${{ steps.claim.outputs.build_id }}.json"
 
       # The imported project may run installation or build scripts. It therefore
       # never receives contents:write. The APK is passed as a short-lived

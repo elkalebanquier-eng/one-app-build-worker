@@ -59,6 +59,52 @@ jobs:
           test -f "$RUNNER_TEMP/one-app-apk/one-app-${{ steps.artifact.outputs.build_id }}.apk"
           test -f "$RUNNER_TEMP/one-app-apk/one-app-${{ steps.artifact.outputs.build_id }}.json"
 
+      - name: Sign release APK and prepare private key backup
+        if: ${{ steps.artifact.outputs.has_apk == 'true' }}
+        shell: bash
+        env:
+          BUILD_ID: ${{ steps.artifact.outputs.build_id }}
+        run: |
+          set -euo pipefail
+          ARTIFACT_DIR="$RUNNER_TEMP/one-app-apk"
+          METADATA="$ARTIFACT_DIR/one-app-$BUILD_ID.json"
+          BUILD_MODE="$(jq -r '.buildMode // "debug"' "$METADATA")"
+          test "$BUILD_MODE" = "debug" || test "$BUILD_MODE" = "signed"
+          if [ "$BUILD_MODE" = "debug" ]; then
+            echo "key_backup_path=" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          UNSIGNED_APK="$ARTIFACT_DIR/one-app-$BUILD_ID.apk"
+          KEYSTORE="$RUNNER_TEMP/one-app-$BUILD_ID.jks"
+          KEY_PASSWORD="$(openssl rand -hex 24)"
+          ALIGNED_APK="$RUNNER_TEMP/one-app-$BUILD_ID-aligned.apk"
+          SIGNED_APK="$RUNNER_TEMP/one-app-$BUILD_ID-signed.apk"
+          BUILD_TOOLS="$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          test -x "$BUILD_TOOLS/apksigner"
+          test -x "$BUILD_TOOLS/zipalign"
+          keytool -genkeypair -keystore "$KEYSTORE" -storetype JKS -storepass "$KEY_PASSWORD" -keypass "$KEY_PASSWORD" -alias oneapp -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=One App $BUILD_ID, OU=One App, O=One App, C=FR" -noprompt
+          "$BUILD_TOOLS/zipalign" -p -f 4 "$UNSIGNED_APK" "$ALIGNED_APK"
+          "$BUILD_TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-key-alias oneapp --ks-pass "pass:$KEY_PASSWORD" --key-pass "pass:$KEY_PASSWORD" --out "$SIGNED_APK" "$ALIGNED_APK"
+          "$BUILD_TOOLS/apksigner" verify --verbose "$SIGNED_APK"
+          mv "$SIGNED_APK" "$UNSIGNED_APK"
+
+          INFO_FILE="$RUNNER_TEMP/one-app-cle-$BUILD_ID.txt"
+          cat > "$INFO_FILE" <<EOF
+          Sauvegarde de clé One App
+
+          Cette clé signe l’application Android : $BUILD_ID
+          Nom de fichier de la clé : one-app-$BUILD_ID.jks
+          Alias : oneapp
+          Mot de passe : $KEY_PASSWORD
+
+          Gardez ce fichier et son mot de passe hors ligne. Ils sont nécessaires pour publier une mise à jour de la même application.
+          EOF
+          KEY_BACKUP="$RUNNER_TEMP/one-app-cle-$BUILD_ID.zip"
+          zip -j -q "$KEY_BACKUP" "$KEYSTORE" "$INFO_FILE"
+          test -s "$KEY_BACKUP"
+          echo "key_backup_path=$KEY_BACKUP" >> "$GITHUB_ENV"
+
       - name: Publish a public APK release for 48 hours
         if: ${{ steps.artifact.outputs.has_apk == 'true' }}
         shell: bash
@@ -80,7 +126,13 @@ jobs:
           set -euo pipefail
           COMPLETION_URL="$(jq -r '.completionUrl' "$RUNNER_TEMP/one-app-apk/one-app-$BUILD_ID.json")"
           test -n "$COMPLETION_URL" && test "$COMPLETION_URL" != "null"
-          curl --fail --show-error --request POST --header "Content-Type: application/json" --data '{"outcome":"complete"}' "$COMPLETION_URL"
+          if [ -n "${key_backup_path:-}" ]; then
+            KEY_BACKUP_BASE64="$(base64 -w 0 "$key_backup_path")"
+            jq -n --arg keyBackupBase64 "$KEY_BACKUP_BASE64" '{outcome: "complete", keyBackupBase64: $keyBackupBase64}' > "$RUNNER_TEMP/one-app-completion.json"
+          else
+            printf '%s' '{"outcome":"complete"}' > "$RUNNER_TEMP/one-app-completion.json"
+          fi
+          curl --fail --show-error --request POST --header "Content-Type: application/json" --data-binary @"$RUNNER_TEMP/one-app-completion.json" "$COMPLETION_URL"
 
   cleanup:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
