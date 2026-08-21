@@ -17,9 +17,6 @@ permissions:
   contents: write
   id-token: write
 
-env:
-  ONE_APP_API_URL: https://kikonative-evby5xxj.manus.space
-
 jobs:
   publish:
     if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' }}
@@ -58,6 +55,9 @@ jobs:
           gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$ARTIFACT_NAME" --dir "$RUNNER_TEMP/one-app-apk"
           test -f "$RUNNER_TEMP/one-app-apk/one-app-${{ steps.artifact.outputs.build_id }}.apk"
           test -f "$RUNNER_TEMP/one-app-apk/one-app-${{ steps.artifact.outputs.build_id }}.json"
+          COMPLETION_URL="$(jq -r '.completionUrl' "$RUNNER_TEMP/one-app-apk/one-app-${{ steps.artifact.outputs.build_id }}.json")"
+          PROGRESS_URL="${COMPLETION_URL/publisher-complete/publisher-progress}"
+          curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data '{"progress":92,"message":"APK reçue. Vérification finale avant publication."}' "$PROGRESS_URL" || true
 
       - name: Sign release APK and prepare private key backup
         if: ${{ steps.artifact.outputs.has_apk == 'true' }}
@@ -70,6 +70,9 @@ jobs:
           METADATA="$ARTIFACT_DIR/one-app-$BUILD_ID.json"
           BUILD_MODE="$(jq -r '.buildMode // "debug"' "$METADATA")"
           test "$BUILD_MODE" = "debug" || test "$BUILD_MODE" = "signed"
+          COMPLETION_URL="$(jq -r '.completionUrl' "$METADATA")"
+          PROGRESS_URL="${COMPLETION_URL/publisher-complete/publisher-progress}"
+          curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data '{"progress":94,"message":"Vérification finale de l’APK en cours."}' "$PROGRESS_URL" || true
           if [ "$BUILD_MODE" = "debug" ]; then
             echo "key_backup_path=" >> "$GITHUB_ENV"
             exit 0
@@ -115,6 +118,9 @@ jobs:
           set -euo pipefail
           TAG="one-app-build-$BUILD_ID"
           APK="$RUNNER_TEMP/one-app-apk/one-app-$BUILD_ID.apk"
+          COMPLETION_URL="$(jq -r '.completionUrl' "$RUNNER_TEMP/one-app-apk/one-app-$BUILD_ID.json")"
+          PROGRESS_URL="${COMPLETION_URL/publisher-complete/publisher-progress}"
+          curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data '{"progress":97,"message":"Publication sécurisée de l’APK en cours."}' "$PROGRESS_URL" || true
           gh release create "$TAG" "$APK#one-app-$BUILD_ID.apk" --repo "$GITHUB_REPOSITORY" --title "APK One App temporaire" --notes "APK créée par One App. Suppression automatique après 48 heures." --prerelease --target "$GITHUB_SHA"
 
       - name: Confirm secure completion to One App

@@ -47,7 +47,9 @@ jobs:
           echo "app_version=$(jq -r '.appVersion' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
           echo "version_code=$(jq -r '.versionCode' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
           echo "worker_completion_url=$(jq -r '.workerCompletionUrl' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
+          echo "worker_progress_url=$(jq -r '.workerProgressUrl' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
           echo "publisher_completion_url=$(jq -r '.publisherCompletionUrl' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
+          echo "publisher_progress_url=$(jq -r '.publisherProgressUrl' "$RUNNER_TEMP/one-app-job.json")" >> "$GITHUB_OUTPUT"
 
       - name: Download the submitted archive
         if: ${{ steps.claim.outputs.has_job == 'true' }}
@@ -63,6 +65,16 @@ jobs:
           test -n "$OIDC_TOKEN" && test "$OIDC_TOKEN" != "null"
           curl --fail --location --proto '=https' --tlsv1.2 --retry 2 --header "Authorization: Bearer $OIDC_TOKEN" --output "$WORK_ROOT/source.zip" "$SOURCE_URL"
           test -s "$WORK_ROOT/source.zip"
+
+      - name: Report project reception
+        if: ${{ steps.claim.outputs.has_job == 'true' }}
+        shell: bash
+        env:
+          PROGRESS_URL: ${{ steps.claim.outputs.worker_progress_url }}
+        run: |
+          set -euo pipefail
+          test -n "$PROGRESS_URL"
+          curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data '{"progress":22,"message":"Projet reçu. Vérification des fichiers en cours."}' "$PROGRESS_URL" || true
 
       - name: Download the selected application icon
         if: ${{ steps.claim.outputs.has_job == 'true' && steps.claim.outputs.icon_url != '' }}
@@ -137,6 +149,16 @@ jobs:
           fi
           test -n "$PROJECT_ROOT"
           echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+
+      - name: Report project validation
+        if: ${{ steps.claim.outputs.has_job == 'true' }}
+        shell: bash
+        env:
+          PROGRESS_URL: ${{ steps.claim.outputs.worker_progress_url }}
+        run: |
+          set -euo pipefail
+          test -n "$PROGRESS_URL"
+          curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data '{"progress":35,"message":"Projet vérifié. Préparation de la compilation Android."}' "$PROGRESS_URL" || true
 
       - name: Set up Node.js for Expo builds
         if: ${{ steps.claim.outputs.project_type == 'expo' }}
@@ -340,11 +362,13 @@ jobs:
         shell: bash
         env:
           BUILD_MODE: ${{ steps.claim.outputs.build_mode }}
+          PROGRESS_URL: ${{ steps.claim.outputs.worker_progress_url }}
         run: |
           set -euo pipefail
           cd "$ANDROID_ROOT"
           TASK="assembleDebug"
           [ "$BUILD_MODE" = "signed" ] && TASK="assembleRelease"
+          curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data '{"progress":55,"message":"Compilation Android en cours. Cela peut prendre quelques minutes."}' "$PROGRESS_URL" || true
           ./gradlew ":app:$TASK" --no-daemon --stacktrace
 
       - name: Build APK from HTML source
@@ -352,6 +376,7 @@ jobs:
         shell: bash
         env:
           BUILD_MODE: ${{ steps.claim.outputs.build_mode }}
+          PROGRESS_URL: ${{ steps.claim.outputs.worker_progress_url }}
         run: |
           set -euo pipefail
           cd "$ANDROID_ROOT"
@@ -359,6 +384,7 @@ jobs:
           unzip -q gradle.zip
           TASK="assembleDebug"
           [ "$BUILD_MODE" = "signed" ] && TASK="assembleRelease"
+          curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data '{"progress":55,"message":"Compilation Android en cours. Cela peut prendre quelques minutes."}' "$PROGRESS_URL" || true
           ./gradle-8.10.2/bin/gradle ":app:$TASK" --no-daemon --stacktrace
 
       - name: Prepare APK artifact
@@ -366,6 +392,7 @@ jobs:
         shell: bash
         env:
           PUBLISHER_COMPLETION_URL: ${{ steps.claim.outputs.publisher_completion_url }}
+          PROGRESS_URL: ${{ steps.claim.outputs.worker_progress_url }}
           BUILD_MODE: ${{ steps.claim.outputs.build_mode }}
         run: |
           set -euo pipefail
@@ -376,6 +403,7 @@ jobs:
           test -n "$APK_PATH"
           mkdir -p "$WORK_ROOT/output"
           cp "$APK_PATH" "$WORK_ROOT/output/one-app-${{ steps.claim.outputs.build_id }}.apk"
+          curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data '{"progress":82,"message":"APK créée. Préparation de sa publication sécurisée."}' "$PROGRESS_URL" || true
           jq -n --arg completionUrl "$PUBLISHER_COMPLETION_URL" --arg buildMode "$BUILD_MODE" '{completionUrl: $completionUrl, buildMode: $buildMode}' > "$WORK_ROOT/output/one-app-${{ steps.claim.outputs.build_id }}.json"
 
       # The imported project may run installation or build scripts. It therefore
