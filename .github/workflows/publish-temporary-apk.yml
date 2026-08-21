@@ -92,7 +92,7 @@ jobs:
           "$BUILD_TOOLS/apksigner" verify --verbose "$SIGNED_APK"
           mv "$SIGNED_APK" "$UNSIGNED_APK"
 
-          INFO_FILE="$RUNNER_TEMP/IMPORTANT-MOT-DE-PASSE-$BUILD_ID.txt"
+          INFO_FILE="$RUNNER_TEMP/MOT-DE-PASSE-ET-INFOS-$BUILD_ID.txt"
           cat > "$INFO_FILE" <<EOF
           IMPORTANT — clé et mot de passe de signature MIA💻
 
