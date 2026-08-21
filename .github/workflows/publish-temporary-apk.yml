@@ -92,16 +92,18 @@ jobs:
           "$BUILD_TOOLS/apksigner" verify --verbose "$SIGNED_APK"
           mv "$SIGNED_APK" "$UNSIGNED_APK"
 
-          INFO_FILE="$RUNNER_TEMP/one-app-cle-$BUILD_ID.txt"
+          INFO_FILE="$RUNNER_TEMP/IMPORTANT-MOT-DE-PASSE-$BUILD_ID.txt"
           cat > "$INFO_FILE" <<EOF
-          Sauvegarde de clé One App
+          IMPORTANT — clé et mot de passe de signature MIA💻
 
           Cette clé signe l’application Android : $BUILD_ID
           Nom de fichier de la clé : one-app-$BUILD_ID.jks
           Alias : oneapp
           Mot de passe : $KEY_PASSWORD
 
-          Gardez ce fichier et son mot de passe hors ligne. Ils sont nécessaires pour publier une mise à jour de la même application.
+          Gardez ce ZIP dans un endroit privé, hors ligne si possible.
+          Ne donnez jamais cette clé ni ce mot de passe à une autre personne.
+          Ils sont nécessaires pour publier une mise à jour de la même application Android.
           EOF
           KEY_BACKUP="$RUNNER_TEMP/one-app-cle-$BUILD_ID.zip"
           zip -j -q "$KEY_BACKUP" "$KEYSTORE" "$INFO_FILE"
