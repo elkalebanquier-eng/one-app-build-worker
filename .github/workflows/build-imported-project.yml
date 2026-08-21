@@ -6,8 +6,8 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
-# This public repository receives no One App secret. GitHub supplies only a short-lived
-# OIDC identity for each run; One App verifies the exact repository and workflow claims.
+# GitHub supplies a short-lived OIDC identity for each run. The Cloudflare relay verifies
+# its signature, the exact repository, the main branch, and this workflow before claiming a build.
 permissions:
   id-token: write
 
@@ -17,8 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      # Public API address only. It contains no credential and is refreshed with the One App release.
-      ONE_APP_API_URL: https://kikonative-evby5xxj.manus.space
+      # Public Cloudflare relay address. It stores source archives only temporarily during builds.
+      ONE_APP_API_URL: https://mia-build-relay.oneapp-kikokalok.workers.dev
       WORK_ROOT: /tmp/one-app-build
     steps:
       - name: Claim one pending build securely
