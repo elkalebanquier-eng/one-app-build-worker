@@ -368,6 +368,7 @@ jobs:
           cd "$ANDROID_ROOT"
           TASK="assembleDebug"
           [ "$BUILD_MODE" = "signed" ] && TASK="assembleRelease"
+          [ "$BUILD_MODE" = "aab" ] && TASK="bundleRelease"
           curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data '{"progress":55,"message":"Compilation Android en cours. Cela peut prendre quelques minutes."}' "$PROGRESS_URL" || true
           ./gradlew ":app:$TASK" --no-daemon --stacktrace
 
@@ -384,10 +385,11 @@ jobs:
           unzip -q gradle.zip
           TASK="assembleDebug"
           [ "$BUILD_MODE" = "signed" ] && TASK="assembleRelease"
+          [ "$BUILD_MODE" = "aab" ] && TASK="bundleRelease"
           curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data '{"progress":55,"message":"Compilation Android en cours. Cela peut prendre quelques minutes."}' "$PROGRESS_URL" || true
           ./gradle-8.10.2/bin/gradle ":app:$TASK" --no-daemon --stacktrace
 
-      - name: Prepare APK artifact
+      - name: Prepare Android artifact
         if: ${{ steps.claim.outputs.has_job == 'true' }}
         shell: bash
         env:
@@ -397,14 +399,25 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$PUBLISHER_COMPLETION_URL"
-          APK_VARIANT="debug"
-          [ "$BUILD_MODE" = "signed" ] && APK_VARIANT="release"
-          APK_PATH="$(find "$ANDROID_ROOT/app/build/outputs/apk/$APK_VARIANT" -maxdepth 1 -type f -name '*.apk' | head -n 1)"
-          test -n "$APK_PATH"
+          ARTIFACT_TYPE="apk"
+          if [ "$BUILD_MODE" = "aab" ]; then
+            ARTIFACT_TYPE="aab"
+            ARTIFACT_PATH="$(find "$ANDROID_ROOT/app/build/outputs/bundle/release" -maxdepth 1 -type f -name '*.aab' | head -n 1)"
+          else
+            APK_VARIANT="debug"
+            [ "$BUILD_MODE" = "signed" ] && APK_VARIANT="release"
+            ARTIFACT_PATH="$(find "$ANDROID_ROOT/app/build/outputs/apk/$APK_VARIANT" -maxdepth 1 -type f -name '*.apk' | head -n 1)"
+          fi
+          test -n "$ARTIFACT_PATH"
           mkdir -p "$WORK_ROOT/output"
-          cp "$APK_PATH" "$WORK_ROOT/output/one-app-${{ steps.claim.outputs.build_id }}.apk"
-          curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data '{"progress":82,"message":"APK créée. Préparation de sa publication sécurisée."}' "$PROGRESS_URL" || true
-          jq -n --arg completionUrl "$PUBLISHER_COMPLETION_URL" --arg buildMode "$BUILD_MODE" '{completionUrl: $completionUrl, buildMode: $buildMode}' > "$WORK_ROOT/output/one-app-${{ steps.claim.outputs.build_id }}.json"
+          cp "$ARTIFACT_PATH" "$WORK_ROOT/output/one-app-${{ steps.claim.outputs.build_id }}.$ARTIFACT_TYPE"
+          if [ "$ARTIFACT_TYPE" = "aab" ]; then
+            MESSAGE="Fichier AAB créé. Préparation de sa publication sécurisée."
+          else
+            MESSAGE="APK créée. Préparation de sa publication sécurisée."
+          fi
+          jq -n --argjson progress 82 --arg message "$MESSAGE" '{progress: $progress, message: $message}' | curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data-binary @- "$PROGRESS_URL" || true
+          jq -n --arg completionUrl "$PUBLISHER_COMPLETION_URL" --arg buildMode "$BUILD_MODE" --arg artifactType "$ARTIFACT_TYPE" '{completionUrl: $completionUrl, buildMode: $buildMode, artifactType: $artifactType}' > "$WORK_ROOT/output/one-app-${{ steps.claim.outputs.build_id }}.json"
 
       # The imported project may run installation or build scripts. It therefore
       # never receives contents:write. The APK is passed as a short-lived
@@ -418,8 +431,7 @@ jobs:
           # Keeping them in one short-lived artifact preserves the trusted split:
           # imported code still cannot publish a GitHub release itself.
           path: |
-            ${{ env.WORK_ROOT }}/output/one-app-${{ steps.claim.outputs.build_id }}.apk
-            ${{ env.WORK_ROOT }}/output/one-app-${{ steps.claim.outputs.build_id }}.json
+            ${{ env.WORK_ROOT }}/output/one-app-${{ steps.claim.outputs.build_id }}.*
           if-no-files-found: error
           retention-days: 2
 
