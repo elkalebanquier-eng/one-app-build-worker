@@ -370,7 +370,16 @@ jobs:
           [ "$BUILD_MODE" = "signed" ] && TASK="assembleRelease"
           [ "$BUILD_MODE" = "aab" ] && TASK="bundleRelease"
           curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data '{"progress":55,"message":"Compilation Android en cours. Cela peut prendre quelques minutes."}' "$PROGRESS_URL" || true
-          ./gradlew ":app:$TASK" --no-daemon --stacktrace
+          for ATTEMPT in 1 2 3; do
+            if ./gradlew ":app:$TASK" --no-daemon --stacktrace; then
+              exit 0
+            fi
+            [ "$ATTEMPT" = "3" ] && exit 1
+            DELAY=30
+            [ "$ATTEMPT" = "2" ] && DELAY=60
+            jq -n --argjson progress 56 --arg message "Téléchargement Android temporairement limité. Nouvelle tentative dans $DELAY secondes." '{progress: $progress, message: $message}' | curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data-binary @- "$PROGRESS_URL" || true
+            sleep "$DELAY"
+          done
 
       - name: Build APK from HTML source
         if: ${{ steps.claim.outputs.project_type == 'html' }}
@@ -387,7 +396,16 @@ jobs:
           [ "$BUILD_MODE" = "signed" ] && TASK="assembleRelease"
           [ "$BUILD_MODE" = "aab" ] && TASK="bundleRelease"
           curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data '{"progress":55,"message":"Compilation Android en cours. Cela peut prendre quelques minutes."}' "$PROGRESS_URL" || true
-          ./gradle-8.10.2/bin/gradle ":app:$TASK" --no-daemon --stacktrace
+          for ATTEMPT in 1 2 3; do
+            if ./gradle-8.10.2/bin/gradle ":app:$TASK" --no-daemon --stacktrace; then
+              exit 0
+            fi
+            [ "$ATTEMPT" = "3" ] && exit 1
+            DELAY=30
+            [ "$ATTEMPT" = "2" ] && DELAY=60
+            jq -n --argjson progress 56 --arg message "Téléchargement Android temporairement limité. Nouvelle tentative dans $DELAY secondes." '{progress: $progress, message: $message}' | curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data-binary @- "$PROGRESS_URL" || true
+            sleep "$DELAY"
+          done
 
       - name: Prepare Android artifact
         if: ${{ steps.claim.outputs.has_job == 'true' }}
