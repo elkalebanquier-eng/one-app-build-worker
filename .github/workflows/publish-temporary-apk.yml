@@ -88,6 +88,13 @@ jobs:
           PROGRESS_URL="${COMPLETION_URL/publisher-complete/publisher-progress}"
           if [ "$ARTIFACT_TYPE" = "aab" ]; then MESSAGE="Vérification finale du fichier AAB en cours."; else MESSAGE="Vérification finale de l’APK en cours."; fi
           jq -n --argjson progress 94 --arg message "$MESSAGE" '{progress: $progress, message: $message}' | curl --fail --silent --show-error --request POST --header "Content-Type: application/json" --data-binary @- "$PROGRESS_URL" || true
+          if [ "$ARTIFACT_TYPE" = "aab" ]; then
+            unzip -tq "$ARTIFACT" >/dev/null
+            for REQUIRED_ENTRY in BundleConfig.pb base/manifest/AndroidManifest.xml; do
+              unzip -Z1 "$ARTIFACT" | grep -Fx "$REQUIRED_ENTRY" >/dev/null
+            done
+            unzip -Z1 "$ARTIFACT" | grep -Eq '^base/dex/[^/]+\.dex$'
+          fi
           if [ "$BUILD_MODE" = "debug" ]; then
             echo "key_backup_path=" >> "$GITHUB_ENV"
             exit 0
