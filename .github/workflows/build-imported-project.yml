@@ -197,7 +197,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cd "$PROJECT_ROOT"
+          DEPENDENCY_ROOT="$PROJECT_ROOT"
+          if [ -f "$PROJECT_ROOT/capacitor.settings.gradle" ] && [ -f "$PROJECT_ROOT/../package.json" ]; then
+            DEPENDENCY_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
+          fi
+          cd "$DEPENDENCY_ROOT"
           if [ -f package.json ]; then
             if [ -f package-lock.json ]; then
               npm ci --ignore-scripts --no-audit --no-fund
@@ -208,8 +212,8 @@ jobs:
               npm install --ignore-scripts --no-audit --no-fund
             fi
           fi
-          if [ -f android/capacitor.settings.gradle ] && grep -q "node_modules/@capacitor/android/capacitor" android/capacitor.settings.gradle; then
-            test -d node_modules/@capacitor/android/capacitor
+          if [ -f "$PROJECT_ROOT/capacitor.settings.gradle" ] && grep -q "node_modules/@capacitor/android/capacitor" "$PROJECT_ROOT/capacitor.settings.gradle"; then
+            test -d "$DEPENDENCY_ROOT/node_modules/@capacitor/android/capacitor"
           fi
 
       - name: Generate Android project from Expo source
