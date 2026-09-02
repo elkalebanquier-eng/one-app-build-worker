@@ -186,6 +186,32 @@ jobs:
             pnpm install --no-frozen-lockfile
           fi
 
+      - name: Set up Node.js for Capacitor Android builds
+        if: ${{ steps.claim.outputs.project_type == 'android' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Capacitor Android project dependencies
+        if: ${{ steps.claim.outputs.project_type == 'android' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+          if [ -f package.json ]; then
+            if [ -f package-lock.json ]; then
+              npm ci --ignore-scripts --no-audit --no-fund
+            elif [ -f pnpm-lock.yaml ]; then
+              corepack enable
+              pnpm install --frozen-lockfile --ignore-scripts
+            else
+              npm install --ignore-scripts --no-audit --no-fund
+            fi
+          fi
+          if [ -f android/capacitor.settings.gradle ] && grep -q "node_modules/@capacitor/android/capacitor" android/capacitor.settings.gradle; then
+            test -d node_modules/@capacitor/android/capacitor
+          fi
+
       - name: Generate Android project from Expo source
         if: ${{ steps.claim.outputs.project_type == 'expo' }}
         shell: bash
